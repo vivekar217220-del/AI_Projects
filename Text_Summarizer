@@ -1,0 +1,33 @@
+Steps For making this :
+(1)
+!pip install transformers
+!pip install torch
+!pip install gradio
+!pip install datasets //For Download the all require Packages.
+(2)
+from transformers import T5Tokenizer , T5ForConditionalGeneration
+model_name = 't5-small'
+tokenizer = T5Tokenizer.from_pretrained(model_name)
+model = T5ForConditionalGeneration.from_pretrained(model_name) //For Tokenization for Count the Word This code loads a pre-trained T5 model and tokenizer 
+to convert input text into tokens and generate summarized output using a text-to-text transformer.
+
+(3)
+def summarize(text):
+    inputs = tokenizer.encode("summarize: " + text, return_tensors="pt", max_length=1024, truncation=True)
+    summary_ids = model.generate(inputs, max_length=150, min_length=40, length_penalty=2.0, num_beams=4, early_stopping=True)
+    return tokenizer.decode(summary_ids[0], skip_special_tokens=True) //This function encodes the input text, generates a summary using the T5 model with beam search, 
+                                                                        and then decodes the generated tokens back into readable summarized text.
+(4)
+import gradio as gr
+
+iface = gr.Interface(
+    fn=summarize,
+    inputs="text",
+    outputs="text",
+    title="Text Summarization with T5",
+    description="Enter text to get a summarized version using the T5 model."
+
+) 
+iface.launch()
+//This code creates a simple Gradio web interface that takes text input, runs it through the summarize function, and displays the summarized output.
+Google Collab Notebook Link For Text Summarizer :- https://colab.research.google.com/drive/16eq4xWrxKD2qtFc09EMAewZbTVjjxcPj?usp=sharing#scrollTo=1mEFp9KNkLnm
