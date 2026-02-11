@@ -1,0 +1,249 @@
+//Step By step Codes for the Making an Chatbox
+(1)
+!pip install groq // For Downloading Groq Package.
+(2)
+!pip install python-docx //For Downloading python-docx Packge. 
+(3)
+import os
+import json
+import logging
+import sys
+import gradio as gr
+from groq import Groq, BadRequestError
+from docx import Document
+
+# ==========================================
+# 1. SETUP & CONFIG
+# ==========================================
+# Install dependencies if missing (Colab specific)
+try:
+    import docx
+    import groq
+    import gradio
+except ImportError:
+    os.system('pip install groq gradio python-docx')
+
+# Configure Logging
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# If using Colab Secrets, uncomment below:
+from google.colab import userdata
+api_key = userdata.get('VivekChaudhary')
+
+if not api_key:
+    print("⚠️ WARNING: GROQ_API_KEY is missing. Set it in os.environ or Colab secrets.")
+
+client = Groq(api_key=api_key)
+MODEL_ID = "openai/gpt-oss-20b" # Using the ID you requested
+
+# ==========================================
+# 2. SANDBOX EXECUTION (SAFE)
+# ==========================================
+def run_sandbox_python(code):
+    """
+    Executes Python code in a restricted local scope.
+    """
+    logger.info(f"⚡ SANDBOX: Executing code...")
+
+    # 1. Define restricted globals
+    # We explicitly allow Document (for word files) and basic math
+    restricted_globals = {
+        "Document": Document,
+        "math": __import__("math"),
+        "random": __import__("random"),
+        "datetime": __import__("datetime"),
+        "abs": abs, "round": round, "pow": pow, "sum": sum,
+        "min": min, "max": max, "len": len, "range": range, "str": str, "int": int, "float": float,
+    }
+
+    # 2. Capture output
+    output_log = []
+    def log_print(*args):
+        s = " ".join(map(str, args))
+        output_log.append(s)
+
+    restricted_globals["print"] = log_print
+
+    try:
+        # 3. Clean code (Remove markdown if the model ignored instructions)
+        code = code.replace("```python", "").replace("```", "").strip()
+
+        # 4. Execute
+        exec(code, restricted_globals)
+
+        # 5. Check for created files
+        files = [f for f in os.listdir('.') if f.endswith('.docx')]
+
+        output_text = "\n".join(output_log)
+        if not output_text:
+            output_text = "Code executed successfully (No text output)."
+
+        if files:
+            output_text += f"\n[System Notification] Files currently in directory: {', '.join(files)}"
+
+        return output_text
+
+    except Exception as e:
+        return f"❌ Execution Error: {str(e)}"
+
+# ==========================================
+# 3. CHAT LOGIC
+# ==========================================
+def chat_function(message, history):
+    try:
+        # System Prompt: heavily optimized for Tool Calling stability
+        system_prompt = (
+            "You are an AI assistant with a Python Sandbox tool. "
+            "INSTRUCTIONS:\n"
+            "1. To create Word files or solve math, call 'execute_python_sandbox'.\n"
+            "2. 'python-docx' is ALREADY INSTALLED. Do not try to pip install it.\n"
+            "3. IMPORTANT: When calling the tool, the 'code' argument must be a SINGLE VALID JSON STRING.\n"
+            "   Example: {\"code\": \"import math\\nprint(math.sqrt(25))\"}\n"
+            "   Do NOT write raw code outside the JSON string."
+        )
+
+        messages = [{"role": "system", "content": system_prompt}]
+
+        for h in history:
+            messages.append({"role": "user", "content": h[0]})
+            if h[1]:
+                messages.append({"role": "assistant", "content": h[1]})
+
+        messages.append({"role": "user", "content": message})
+
+        tools = [
+            {"type": "browser_search"},
+            {
+                "type": "function",
+                "function": {
+                    "name": "execute_python_sandbox",
+                    "description": "Run Python code. Required for Math and File Creation.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "code": {"type": "string", "description": "The python code to run. Must be a valid JSON string."}
+                        },
+                        "required": ["code"]
+                    }
+                }
+            }
+        ]
+
+        # Call Groq
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_ID,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_completion_tokens=4096,
+                temperature=0.3 # Lower temp reduces syntax errors
+            )
+        except BadRequestError as e:
+            # If the model fails to generate valid JSON for the tool, we catch it here.
+            if "tool_use_failed" in str(e) or "parse" in str(e):
+                yield "⚠️ **Model Error**: The model tried to write code but failed the JSON formatting check. Please try asking again simply."
+                logger.error(f"Groq Bad Request (Usually Malformed JSON): {e}")
+                return
+            else:
+                raise e
+
+        response_msg = response.choices[0].message
+        tool_calls = response_msg.tool_calls
+
+        if tool_calls:
+            messages.append(response_msg)
+
+            for tool_call in tool_calls:
+                fn_name = tool_call.function.name
+
+                if fn_name == "execute_python_sandbox":
+                    try:
+                        args = json.loads(tool_call.function.arguments)
+                        code_to_run = args.get("code", "")
+                        # Run the sandbox
+                        result = run_sandbox_python(code_to_run)
+                    except json.JSONDecodeError:
+                        result = "Error: Arguments were not valid JSON."
+                    except Exception as e:
+                        result = f"Error processing tool: {str(e)}"
+
+                elif fn_name == "browser_search":
+                    result = "Browser search simulation: Search active."
+                else:
+                    result = "Tool executed."
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": fn_name,
+                    "content": str(result)
+                })
+
+            # Final Answer
+            stream = client.chat.completions.create(
+                model=MODEL_ID,
+                messages=messages,
+                stream=True
+            )
+
+            partial_text = ""
+            for chunk in stream:
+                content = chunk.choices[0].delta.content
+                if content:
+                    partial_text += content
+                    yield partial_text
+        else:
+            yield response_msg.content
+
+    except Exception as e:
+        error_text = f"🚨 **System Error**: {str(e)}"
+        logger.error(error_text)
+        yield error_text
+
+# ==========================================
+# 4. GRADIO UI
+# ==========================================
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown(f"### ⚡ Groq Sandbox (Fixed)")
+    chatbot = gr.Chatbot(height=500, type="messages")
+    msg = gr.Textbox(label="Your Request")
+
+    # Helper to convert Gradio's new list[dict] format back to list[list] for older logic if needed
+    # But here we just used list[dict] in the chatbot, so we process manual lists in the function
+
+    def user(user_message, history):
+        return "", history + [{"role": "user", "content": user_message}]
+
+    def bot(history):
+        # Extract messages for our logic: Map [{'role': 'user', 'content': 'hi'}] -> [['hi', '']]
+        # We need to construct the 'history' argument for chat_function expected format: List[List[str]]
+
+        legacy_history = []
+        user_msg = history[-1]['content'] # Current message
+
+        # Build history from previous turns
+        # This assumes strictly User -> Assistant -> User order
+        for i in range(len(history) - 1):
+            msg_obj = history[i]
+            if msg_obj['role'] == 'user':
+                # Check if next is assistant
+                if i+1 < len(history)-1 and history[i+1]['role'] == 'assistant':
+                    legacy_history.append([msg_obj['content'], history[i+1]['content']])
+                elif i+1 == len(history)-1: # Last one before current
+                    pass
+
+        # Add placeholder for streaming
+        history.append({"role": "assistant", "content": ""})
+
+        # Stream response
+        for chunk in chat_function(user_msg, legacy_history):
+            history[-1]['content'] = chunk
+            yield history
+
+    msg.submit(user, [msg, chatbot], [msg, chatbot], queue=False).then(bot, chatbot, chatbot)
+
+if __name__ == "__main__":
+    demo.launch(debug=True)
+Googal Collab ID For this Project :- https://colab.research.google.com/drive/1hLRN6HGMIjweDb0Wb82ZkK8cxj79WQ0B#scrollTo=8JvbLdnHxmfE
